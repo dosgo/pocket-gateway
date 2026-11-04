@@ -3,9 +3,30 @@
 把一台闲置安卓手机变成**随身 Wi-Fi 代理网关**：它自己开热点，热点下的电脑 / 平板 / 另一台手机把代理指向它就能上网；反过来，它也能当客户端，把整机流量经 UDP 隧道丢给另一台网关。
 
 <p align="center">
+  <a href="https://github.com/dosgo/pocket-gateway/releases/latest"><img src="https://img.shields.io/github/v/release/dosgo/pocket-gateway?label=release" alt="release"></a>
+  <img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?logo=android&logoColor=white" alt="Android 7.0+">
+  <img src="https://img.shields.io/badge/minSdk-24-blue" alt="minSdk 24">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT"></a>
+</p>
+
+<p align="center">
   <img src="docs/gw-2.9.png" width="300" alt="网关界面">
   <img src="docs/p2p-1.5.png" width="300" alt="Wi-Fi Direct 固定组">
 </p>
+
+## 下载
+
+直接装 [Releases](https://github.com/dosgo/pocket-gateway/releases/latest) 里的 APK（已签名，Android 7.0+，无需 root）。
+
+安装时如果系统拦 `adb install`（部分国产 ROM 会返回 `reject adb install`），用 PackageInstaller 会话装即可：
+
+```bash
+adb push PocketGateway-2.9.apk /data/local/tmp/gw.apk
+SZ=$(stat -c %s PocketGateway-2.9.apk)
+SID=$(adb shell pm install-create -r -t -S $SZ | grep -o '[0-9]\+')
+adb shell pm install-write -S $SZ $SID base /data/local/tmp/gw.apk
+adb shell pm install-commit $SID
+```
 
 ## 能干什么
 

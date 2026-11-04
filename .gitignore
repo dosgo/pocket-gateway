@@ -30,3 +30,10 @@ desktop.ini
 zte_ui*.xml
 *.tmp
 __pycache__/
+
+# ---- 本次发布用的一次性凭据（用完即删）----
+.gh_token
+.gh_login
+.gh_repo
+tok.json
+gh_dev.json
