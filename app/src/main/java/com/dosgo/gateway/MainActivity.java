@@ -70,6 +70,13 @@ public class MainActivity extends Activity {
     private ImageView hsQr;
     private String hsQrKey = "";
 
+    private EditText wgPort;
+    private Button wgBtn;
+    private TextView wgText;
+    private CheckBox wgAuto;
+    private ImageView wgQr;
+    private String wgQrKey = "";
+
     private EditText vpnGw;
     private Button vpnBtn;
     private TextView vpnText;
@@ -90,6 +97,7 @@ public class MainActivity extends Activity {
             refreshState();
             refreshClient();
             refreshHotspot();
+            refreshWg();
             ui.postDelayed(this, 900);
         }
     };
@@ -151,6 +159,15 @@ public class MainActivity extends Activity {
             refreshHotspot();
         } else if ("p2p_off".equals(cmd)) {
             P2pController.stop();
+        } else if ("wg_on".equals(cmd)) {
+            String werr = WgController.start(this);
+            Logs.add(werr == null ? "WG 已通过命令启动" : "WG 启动失败：" + werr);
+            refreshWg();
+        } else if ("wg_off".equals(cmd)) {
+            WgController.stop();
+            refreshWg();
+        } else if ("wg_cfg".equals(cmd)) {
+            Logs.add("WG 配置:\n" + WgController.clientConfig(this, NetUtils.primaryIp()));
         } else if ("vpn_on".equals(cmd)) {
             String gw = it.getStringExtra("gw");
             if (gw != null && vpnGw != null) {
@@ -495,6 +512,83 @@ public class MainActivity extends Activity {
         qrLp.topMargin = dp(12);
         qrLp.gravity = Gravity.CENTER_HORIZONTAL;
         hsCard.addView(hsQr, qrLp);
+
+        // ---- WireGuard 隧道 ----
+        LinearLayout wgCard = card();
+        root.addView(wgCard, cardLp());
+        wgCard.addView(label("WireGuard 隧道（标准协议 · 全流量）"));
+
+        TextView wgHint = new TextView(this);
+        wgHint.setText("任何平台的官方 WireGuard 客户端扫码或导入 .conf 即可：TCP / UDP / ICMP 全部经本机出去，"
+                + "不用装本 App，也不用每个 App 单独配代理。和上面的 FOU 可以同时开。");
+        wgHint.setTextColor(MUTED);
+        wgHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        wgHint.setPadding(0, dp(6), 0, 0);
+        wgHint.setLineSpacing(dp(2), 1f);
+        wgCard.addView(wgHint);
+
+        wgPort = textRow(wgCard, "监听端口", String.valueOf(WgController.port(this)),
+                InputType.TYPE_CLASS_NUMBER);
+
+        wgAuto = new CheckBox(this);
+        wgAuto.setText("启动网关时自动开 WireGuard");
+        wgAuto.setTextColor(MUTED);
+        wgAuto.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        wgAuto.setChecked(WgController.prefAuto(this));
+        LinearLayout.LayoutParams wgAutoLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wgAutoLp.topMargin = dp(10);
+        wgCard.addView(wgAuto, wgAutoLp);
+        wgAuto.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton b, boolean checked) {
+                WgController.setPrefAuto(MainActivity.this, checked);
+            }
+        });
+
+        wgBtn = new Button(this);
+        wgBtn.setText("启动 WireGuard");
+        wgBtn.setTextColor(0xFFFFFFFF);
+        wgBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        wgBtn.setAllCaps(false);
+        wgBtn.setBackground(roundRect(0xFF238636, 10, 0, 0));
+        LinearLayout.LayoutParams wgBtnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
+        wgBtnLp.topMargin = dp(8);
+        wgCard.addView(wgBtn, wgBtnLp);
+        wgBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleWg();
+            }
+        });
+
+        wgText = new TextView(this);
+        wgText.setTextColor(MUTED);
+        wgText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        wgText.setPadding(0, dp(10), 0, 0);
+        wgText.setLineSpacing(dp(3), 1f);
+        wgCard.addView(wgText);
+        wgText.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String ip = NetUtils.primaryIp();
+                String conf = WgController.clientConfig(MainActivity.this, ip);
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("wireguard.conf", conf));
+                    Toast.makeText(MainActivity.this, "WireGuard 配置已复制（保存成 .conf 导入）",
+                            Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+
+        wgQr = new ImageView(this);
+        wgQr.setVisibility(View.GONE);
+        LinearLayout.LayoutParams wgQrLp = new LinearLayout.LayoutParams(dp(200), dp(200));
+        wgQrLp.topMargin = dp(12);
+        wgQrLp.gravity = Gravity.CENTER_HORIZONTAL;
+        wgCard.addView(wgQr, wgQrLp);
 
         // ---- 启动按钮 ----
         toggleBtn = new Button(this);
@@ -922,24 +1016,111 @@ public class MainActivity extends Activity {
             return;
         }
         try {
-            String content = "WIFI:T:WPA;S:" + ssid + ";P:" + pass + ";;";
-            BitMatrix bm = new QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, 480, 480);
-            int w = bm.getWidth();
-            int h = bm.getHeight();
-            int[] px = new int[w * h];
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    px[y * w + x] = bm.get(x, y) ? 0xFF000000 : 0xFFFFFFFF;
-                }
-            }
-            Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-            bmp.setPixels(px, 0, w, 0, 0, w, h);
-            hsQr.setImageBitmap(bmp);
+            hsQr.setImageBitmap(qrBitmap("WIFI:T:WPA;S:" + ssid + ";P:" + pass + ";;"));
             hsQr.setVisibility(View.VISIBLE);
             hsQrKey = key;
         } catch (Throwable t) {
             hsQr.setVisibility(View.GONE);
             hsQrKey = "";
+        }
+    }
+
+    /** 把任意文本编成二维码位图（Wi-Fi 连接信息、WireGuard .conf 共用）。 */
+    private Bitmap qrBitmap(String content) throws Exception {
+        BitMatrix bm = new QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, 480, 480);
+        int w = bm.getWidth();
+        int h = bm.getHeight();
+        int[] px = new int[w * h];
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                px[y * w + x] = bm.get(x, y) ? 0xFF000000 : 0xFFFFFFFF;
+            }
+        }
+        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        bmp.setPixels(px, 0, w, 0, 0, w, h);
+        return bmp;
+    }
+
+    // ------------------------------------------------------------ WireGuard
+
+    private void toggleWg() {
+        WgController.syncActive();
+        if (WgController.active) {
+            WgController.stop();
+            refreshWg();
+            return;
+        }
+        int p;
+        try {
+            p = Integer.parseInt(wgPort.getText().toString().trim());
+        } catch (Exception e) {
+            p = WgController.DEFAULT_PORT;
+        }
+        WgController.setPort(this, p);
+        wgPort.setText(String.valueOf(WgController.port(this)));
+        String err = WgController.start(this);
+        if (err != null) {
+            Toast.makeText(this, "WireGuard 启动失败：" + err, Toast.LENGTH_LONG).show();
+        }
+        refreshWg();
+    }
+
+    private void refreshWg() {
+        if (wgBtn == null) {
+            return;
+        }
+        WgController.syncActive();
+        if (WgController.active) {
+            wgBtn.setText("停止 WireGuard");
+            wgBtn.setBackground(roundRect(0xFF30363D, 10, 0, 0));
+            wgPort.setEnabled(false);
+            String s = WgController.summary();
+            StringBuilder sb = new StringBuilder();
+            sb.append("● WireGuard 已启动   UDP ").append(WgController.port(this))
+                    .append("\n服务端公钥：").append(WgController.serverPub(this));
+            if (!s.isEmpty()) {
+                sb.append("\n").append(s);
+            }
+            sb.append("\n点这段文字复制 .conf；或让客户端扫下面的二维码导入");
+            TextView wgT = wgText;
+            String want = sb.toString();
+            if (!want.contentEquals(wgT.getText())) {
+                wgT.setTextColor(GREEN);
+                wgT.setText(want);
+            }
+            showWgQr();
+        } else {
+            wgBtn.setText("启动 WireGuard");
+            wgBtn.setBackground(roundRect(0xFF238636, 10, 0, 0));
+            wgPort.setEnabled(true);
+            String t = WgController.note == null || WgController.note.isEmpty()
+                    ? "○ 未开启（客户端导入 .conf 或扫码后，全流量经本机出去）"
+                    : "○ 未开启：" + WgController.note;
+            if (!t.contentEquals(wgText.getText())) {
+                wgText.setTextColor(WgController.note != null && !WgController.note.isEmpty() ? RED : MUTED);
+                wgText.setText(t);
+            }
+            wgQr.setVisibility(View.GONE);
+            wgQrKey = "";
+        }
+    }
+
+    private void showWgQr() {
+        if (wgQr == null) {
+            return;
+        }
+        final String conf = WgController.clientConfig(this, NetUtils.primaryIp());
+        if (conf.equals(wgQrKey)) {
+            wgQr.setVisibility(View.VISIBLE);
+            return;
+        }
+        try {
+            wgQr.setImageBitmap(qrBitmap(conf));
+            wgQr.setVisibility(View.VISIBLE);
+            wgQrKey = conf;
+        } catch (Throwable t) {
+            wgQr.setVisibility(View.GONE);
+            wgQrKey = "";
         }
     }
 

@@ -122,6 +122,10 @@ public class GatewayService extends Service {
         } catch (Throwable e) {
             Logs.add("FOU 启动失败: " + e.getMessage());
         }
+        if (WgController.prefAuto(this)) {
+            String werr = WgController.start(this);
+            Logs.add(werr == null ? "自动开 WireGuard：已启动" : "WireGuard 未开启：" + werr);
+        }
 
         String ip = NetUtils.primaryIp();
         Logs.add("网关已就绪，本机 IP " + (ip == null ? "未知" : ip));
@@ -142,6 +146,7 @@ public class GatewayService extends Service {
             http = null;
         }
         FouEngine.stop();
+        WgController.stop();
         HotspotController.stop();
         P2pController.stop();
         P2pController.stop();

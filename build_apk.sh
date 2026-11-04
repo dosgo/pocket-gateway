@@ -15,8 +15,8 @@ PY="C:/Users/DosGo/.workbuddy/binaries/python/versions/3.13.12/python.exe"
 
 MIN_SDK=24
 TARGET_SDK=33
-VERSION_CODE=26
-VERSION_NAME="3.4"
+VERSION_CODE=27
+VERSION_NAME="3.5"
 
 # Windows 原生工具需要 Windows 风格路径
 W() { cygpath -w "$1"; }
