@@ -46,7 +46,7 @@ gomobile bind \
   -target=android/arm64,android/arm,android/amd64 \
   -androidapi 21 \
   -trimpath \
-  -ldflags="-s -w" \
+  -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" \
   -o "$(cygpath -w "$APP_DIR/app/libs/fougw.aar")" \
   ./fougw
 

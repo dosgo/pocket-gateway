@@ -15,8 +15,8 @@ PY="C:/Users/DosGo/.workbuddy/binaries/python/versions/3.13.12/python.exe"
 
 MIN_SDK=24
 TARGET_SDK=33
-VERSION_CODE=25
-VERSION_NAME="3.3"
+VERSION_CODE=26
+VERSION_NAME="3.4"
 
 # Windows 原生工具需要 Windows 风格路径
 W() { cygpath -w "$1"; }
@@ -114,13 +114,18 @@ with zipfile.ZipFile(apk, 'r') as zin, zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEF
         zout.writestr(item, zin.read(item.filename))
     zout.write(dex, 'classes.dex')
     for src, name in libs:
-        zout.write(src, name)
+        # .so 必须 STORED（不压缩）+ 页对齐：extractNativeLibs=false 时直接从 APK mmap
+        zi = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+        zi.compress_type = zipfile.ZIP_STORED
+        zi.external_attr = 0o644 << 16
+        with open(src, 'rb') as f:
+            zout.writestr(zi, f.read())
 shutil.move(tmp, apk)
 print("   dex + %d 个 so 已写入, apk = %.1fMB" % (len(libs), os.path.getsize(apk) / 1048576))
 PYEOF
 
 echo "[6/8] zipalign + 签名"
-"$BT/zipalign.exe" -f -p 4 build/base.apk build/aligned.apk
+"$BT/zipalign.exe" -f -P 16 4 build/base.apk build/aligned.apk
 
 KS="$APP_DIR/keystore/gateway.jks"
 if [ ! -f "$KS" ]; then
