@@ -138,12 +138,15 @@ public class MainActivity extends Activity {
                 toggleService();
             }
         } else if ("p2p_on".equals(cmd)) {
-            // AP 与 P2P GO 通常不能并存，先关热点
-            HotspotController.stop();
-            hsAuto.setChecked(false);
-            String err = P2pController.start(this, P2pController.FIXED_SSID, P2pController.FIXED_PASS);
-            if (err != null) {
-                Toast.makeText(this, err, Toast.LENGTH_LONG).show();
+            // 同一颗 Wi-Fi 芯片不能并存两种 AP：热点开着就拒绝
+            if (HotspotController.active || HotspotController.isStarting()) {
+                Logs.add("p2p_on 拒绝：热点开着，先关热点");
+                Toast.makeText(this, "热点开着时用不了直连：先关掉热点", Toast.LENGTH_SHORT).show();
+            } else {
+                String err = P2pController.start(this, P2pController.FIXED_SSID, P2pController.FIXED_PASS);
+                if (err != null) {
+                    Toast.makeText(this, err, Toast.LENGTH_LONG).show();
+                }
             }
             refreshHotspot();
         } else if ("p2p_off".equals(cmd)) {
@@ -160,30 +163,6 @@ public class MainActivity extends Activity {
             startService(i);
         } else if ("porttest".equals(cmd)) {
             Logs.add("端口探测 " + P2pController.probeDhcpPort());
-        } else if ("prefs".equals(cmd)) {
-            Logs.add("prefs: 开机自启=" + AppPrefs.bootStart(this)
-                    + " 自动热点=" + HotspotController.prefAuto(this)
-                    + " 自动直连组=" + P2pController.prefAuto(this));
-        } else if ("auto_hs_on".equals(cmd)) {
-            hsAuto.setChecked(true);
-            Logs.add("prefs: 自动热点已开＝" + HotspotController.prefAuto(this));
-        } else if ("auto_hs_off".equals(cmd)) {
-            hsAuto.setChecked(false);
-            Logs.add("prefs: 自动热点已关＝" + HotspotController.prefAuto(this));
-        } else if ("auto_p2p_on".equals(cmd)) {
-            p2pAuto.setChecked(true);
-            Logs.add("prefs: 自动直连组已开＝" + P2pController.prefAuto(this));
-        } else if ("auto_p2p_off".equals(cmd)) {
-            p2pAuto.setChecked(false);
-            Logs.add("prefs: 自动直连组已关＝" + P2pController.prefAuto(this));
-        } else if ("boot_on".equals(cmd)) {
-            AppPrefs.setBootStart(this, true);
-            bootCheck.setChecked(true);
-            Logs.add("prefs: 开机自启已开");
-        } else if ("boot_off".equals(cmd)) {
-            AppPrefs.setBootStart(this, false);
-            bootCheck.setChecked(false);
-            Logs.add("prefs: 开机自启已关");
         } else if ("prefs".equals(cmd)) {
             Logs.add("prefs: 开机自启=" + AppPrefs.bootStart(this)
                     + " 自动热点=" + HotspotController.prefAuto(this)
@@ -887,6 +866,11 @@ public class MainActivity extends Activity {
             refreshHotspot();
             return;
         }
+        if (HotspotController.active || HotspotController.isStarting()) {
+            Toast.makeText(this, "热点开着时用不了直连：先关掉热点", Toast.LENGTH_SHORT).show();
+            refreshHotspot();
+            return;
+        }
         if (!hasHotspotPermissions()) {
             requestPermissions(hotspotPermissions(), REQ_PERM_P2P);
             return;
@@ -904,9 +888,6 @@ public class MainActivity extends Activity {
             String msg = "P2P 需要 Wi-Fi 打开：请先打开 Wi-Fi 开关（不用连网络）";
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             return msg;
-        }
-        if (HotspotController.active) {
-            HotspotController.stop();
         }
         String err = P2pController.start(this, P2pController.FIXED_SSID, P2pController.FIXED_PASS);
         if (err != null) {
@@ -971,10 +952,11 @@ public class MainActivity extends Activity {
         if (P2pController.active) {
             p2pBtn.setText("解散 Wi-Fi Direct 组");
             p2pBtn.setBackground(roundRect(0xFF30363D, 10, 0, 0));
+            p2pBtn.setTextColor(0xFFFFFFFF);
             p2pBtn.setEnabled(true);
+            // 同一个 Wi-Fi 芯片只能当一种 AP：直连组开着时热点不可用
             hsBtn.setEnabled(false);
-            hsBtn.setText("开启热点");
-            hsBtn.setBackground(roundRect(0xFF21262D, 10, 0, 0));
+            hsBtn.setTextColor(MUTED);
             hsBtn.setText("开启热点");
             hsBtn.setBackground(roundRect(0xFF21262D, 10, 0, 0));
             hsSsid.setEnabled(false);
@@ -993,10 +975,22 @@ public class MainActivity extends Activity {
             showQr(P2pController.ssid, P2pController.pass);
             return;
         }
-        p2pBtn.setText(P2pController.isStarting() ? "正在建组…" : "固定名称热点（Wi-Fi Direct）");
-        p2pBtn.setBackground(roundRect(0xFF238636, 10, 0, 0));
+        boolean hotOn = HotspotController.active;
+        if (hotOn || HotspotController.isStarting()) {
+            // 热点开着时，直连按钮置灰不可点：同一颗 Wi-Fi 芯片不能同时当两种 AP
+            p2pBtn.setText("热点开启中，直连不可用");
+            p2pBtn.setTextColor(0xFF6E7681);
+            p2pBtn.setBackground(roundRect(0xFF21262D, 10, 0, 0));
+            p2pBtn.setEnabled(false);
+        } else {
+            p2pBtn.setText(P2pController.isStarting() ? "正在建组…" : "固定名称热点（Wi-Fi Direct）");
+            p2pBtn.setTextColor(0xFFFFFFFF);
+            p2pBtn.setBackground(roundRect(0xFF238636, 10, 0, 0));
+            p2pBtn.setEnabled(true);
+        }
         hsBtn.setEnabled(true);
-        if (HotspotController.active) {
+        hsBtn.setTextColor(0xFFFFFFFF);
+        if (hotOn) {
             hsBtn.setText("关闭热点");
             hsBtn.setBackground(roundRect(0xFF30363D, 10, 0, 0));
             hsSsid.setEnabled(false);
