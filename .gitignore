@@ -1,0 +1,32 @@
+# ---- 构建产物 ----
+build/
+build_dbg/
+*.apk
+*.apk.idsig
+*.aab
+*.log
+
+# gomobile / 打包时从 aar 解出来的 so（每次构建重建，不入库）
+app/src/main/jniLibs/
+
+# ---- 签名密钥：绝不入库 ----
+keystore/
+*.jks
+*.keystore
+
+# ---- Gradle / IDE ----
+.gradle/
+local.properties
+.idea/
+*.iml
+*.hprof
+
+# ---- 系统垃圾 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 调试临时文件 ----
+zte_ui*.xml
+*.tmp
+__pycache__/

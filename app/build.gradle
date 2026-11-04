@@ -1,0 +1,33 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.dosgo.gateway'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId "com.dosgo.gateway"
+        minSdk 24
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    // 本项目零第三方依赖，全部用 framework API
+}
+
+// 不使用 AndroidX / 依赖库，构建无需联网下载额外产物
+dependencies {
+}
