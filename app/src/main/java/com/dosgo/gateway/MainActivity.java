@@ -166,6 +166,10 @@ public class MainActivity extends Activity {
         } else if ("wg_off".equals(cmd)) {
             WgController.stop();
             refreshWg();
+        } else if ("wg_stats".equals(cmd)) {
+            Logs.add("WG 状态: " + WgController.statsJson());
+        } else if ("wg_stats".equals(cmd)) {
+            Logs.add("WG 状态: " + WgController.statsJson());
         } else if ("wg_cfg".equals(cmd)) {
             Logs.add("WG 配置:\n" + WgController.clientConfig(this, NetUtils.primaryIp()));
         } else if ("vpn_on".equals(cmd)) {
@@ -519,7 +523,7 @@ public class MainActivity extends Activity {
         wgCard.addView(label("WireGuard 隧道（标准协议 · 全流量）"));
 
         TextView wgHint = new TextView(this);
-        wgHint.setText("任何平台的官方 WireGuard 客户端扫码或导入 .conf 即可：TCP / UDP / ICMP 全部经本机出去，"
+        wgHint.setText("任何平台的官方 WireGuard 客户端扫码或导入 .conf 即可：TCP / UDP 全部经本机出去，ping 由本机应答，"
                 + "不用装本 App，也不用每个 App 单独配代理。和上面的 FOU 可以同时开。");
         wgHint.setTextColor(MUTED);
         wgHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
@@ -1069,6 +1073,7 @@ public class MainActivity extends Activity {
         if (wgBtn == null) {
             return;
         }
+        WgController.drainLogs();
         WgController.syncActive();
         if (WgController.active) {
             wgBtn.setText("停止 WireGuard");

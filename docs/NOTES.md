@@ -325,11 +325,76 @@ adb shell am start -n com.dosgo.gateway/.MainActivity --es cmd prefs
 
 `adb shell am broadcast -a android.intent.action.BOOT_COMPLETED` **不行**：这个广播是 protected，shell 会直接抛 `SecurityException: not allowed to send broadcast`，只能用上面的自定义 action 验证链路，真开机还得重启。
 
+
+## WireGuard 接入（3.5 起）
+
+网关侧不是 `wg` 内核模块，也不是 `wireguard-go` + 真 tun 设备，而是把 `wireguard-go`
+的 `tun.Device` 接口直接接到已有的 gVisor netstack 上：
+
+| 方向 | 动作 |
+|---|---|
+| 客户端 → 网关 | WireGuard 解密后的内层 IP 包 → `netStack.inject()` → 和 FOU 完全相同的 TCP/UDP forwarder |
+| 网关 → 客户端 | netstack 要发出的包 → `Read()` 取出 → WireGuard 加密 → UDP 发回 peer |
+
+因此整套出站转发（promiscuous + spoofing + forwarder）一份代码两条腿，FOU 与
+WireGuard 可以同时开着。UDP 监听用 `conn.NewStdNetBind()`，不碰 raw socket。
+
+### 踩坑：UAPI 里 `replace_allowed_ips` 必须写在 `allowed_ip` 之前
+
+第一版把三行按这个顺序写：
+
+```
+public_key=<hex>
+allowed_ip=0.0.0.0/0
+replace_allowed_ips=true
+```
+
+结果**握手成功、数据全丢**：客户端 `last_handshake_time` 正常刷新、服务端
+`rx_bytes` 也在涨（这些计数在过滤之前就累加了），但 netstack 侧连接数恒为 0，
+`tcpdump` 之外看不到任何异常。
+
+原因是 UAPI 的语义是「先清空再添加」：
+
+- `replace_allowed_ips=true` 会把该 peer 已有的 allowed-ip **全部删掉**；
+- 写在 `allowed_ip` 后面，等于「加一条，再全删」，peer 最终 allowed-ips 为空；
+- 而 `device/receive.go` 在投递前会用 `device.allowedips.Lookup(src) != peer` 校验
+  内层包的**源地址**，空表一律不匹配 → 每个解出来的包都被静默 `continue` 掉。
+
+正确顺序（也是 `wg` 官方工具的顺序）：先 `replace_allowed_ips=true`，再逐条
+`allowed_ip=`。`wg.go` 里已按这个顺序写，并留了注释。
+
+### ICMP
+
+netstack 只注册了 `ipv4` + `tcp` + `udp`，没有 ICMP 协议，所以 ping 天然不通。
+FOU 那条路径原本就有一个 `icmpEchoReply()`（把 echo request 就地翻成 reply 再发回去），
+现在 `wgTun.Write` 也走同一个函数：ICMP echo 在网关本地应答，其余包照旧进 netstack。
+因为没有 ICMP 进 netstack，转发链路本身不受影响。
+
+### 实测（小米 2602BRT18C / Android 17，PC 走同网段 Wi-Fi）
+
+用 `wireguard-go` + `tun/netstack` 写了一个真实的客户端（服务端公钥 + 客户端私钥，
+走 Noise 握手），不是裸 UDP 打洞：
+
+| 用例 | 结果 |
+|---|---|
+| Noise 握手 | 通过，两侧 `last_handshake_time` 一致刷新 |
+| UDP（`223.5.5.5:53` 真实 DNS 查询） | 通过，收到 61 字节、2 条应答记录 |
+| TCP（`223.5.5.5:80` 发 HTTP GET） | 通过，收到 `HTTP/1.0 404`（该 IP 不提供首页，属正常响应） |
+| 连跑 3 次 | 3/3 都通过，`rx/tx` 字节对称 |
+
+**注意**：同一对密钥同时跑两个客户端会互相抢 peer endpoint（WireGuard 用最后
+收到认证包的源地址更新 endpoint），表现为「新客户端握手成功但随即断流」。测试时
+要把上一个客户端进程退干净。
+
+**ICMP 未在客户端侧验证**：本次用的测试客户端在 `DialPingAddr` 上返回
+`endpoint is in invalid state`（netstack 客户端的 ping 端点自身的问题），
+网关侧的本地应答逻辑与 FOU 共用同一份实现，未经真实 ping 验证。
+
 ## 已知边界
 
 - **没有崩溃隔离**：netstack 跑在 App 进程里，畸形报文触发的 panic 已被 `recoverLog` 拦住，但 Go runtime 级别的致命错误（如 cgo 崩溃）仍会带崩整个 App。
 - APK 6.7 MB，三个 ABI 各带一个 6 MB 的 `libgojni.so`（解压后约 18 MB），只装 arm64 设备的话体积不占优。
-- 只转发 IPv4；IPv6 报文直接丢弃。
+- 只转发 IPv4；IPv6 报文直接丢弃（WireGuard 隧道里也一样，内层 IPv6 会被丢）。
 - SOCKS5 无认证（局域网自用）。要暴露到公网请自行加认证或套隧道。
 - Local-Only Hotspot 的 SSID 由系统随机生成（见上文）；Wi-Fi Direct 组的 SSID 可固定但受 `DIRECT-xy` 前缀约束。
 - **不做 Wi-Fi 开关自愈**：把网关的 Wi-Fi 关掉再打开，热点 / P2P 组就没了，App 不会在后台自动重建，需要手动点一次按钮（v2.1 起移除了这套逻辑）。

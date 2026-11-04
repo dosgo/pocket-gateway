@@ -16,8 +16,8 @@ PY="C:/Users/DosGo/.workbuddy/binaries/python/versions/3.13.12/python.exe"
 
 MIN_SDK=24
 TARGET_SDK=33
-VERSION_CODE=27
-VERSION_NAME="3.5-debug"
+VERSION_CODE=28
+VERSION_NAME="3.6-debug"
 
 BUILD="build_dbg"
 W() { cygpath -w "$1"; }

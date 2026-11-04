@@ -30,8 +30,7 @@
 | **四个入口** | SOCKS5 `1080` · HTTP `8080` · FOU `5555/udp` · WireGuard `51820/udp`，端口可改，可同时开 |
 | **两种热点** | Local-Only 热点（SSID 由系统生成）与 **Wi-Fi Direct 固定组**（SSID 固定 `DIRECT-gwGateway`） |
 | **客户端模式** | `VpnService` 接管整机流量，经 FOU 隧道转给网关，不用逐台配代理 |
-| **WireGuard** | 标准协议接入，官方客户端扫码导入 `.conf` 即全流量（TCP/UDP/ICMP）走网关，客户端不用装本 App |
-| **WireGuard** | 标准协议接入，官方客户端扫码导入 `.conf` 即全流量（TCP/UDP/ICMP）走网关，客户端不用装本 App |
+| **WireGuard** | 标准协议接入，官方客户端扫码导入 `.conf` 即全流量（TCP/UDP）走网关，客户端不用装本 App |
 | **开机自启** | 解锁前就能拉起服务（Direct Boot），解锁后补开热点 |
 | **HTTP 代理** | 标准 `CONNECT` 隧道，HTTPS 端到端，不解密、不碰证书 |
 | **诊断** | 浏览器打开 `http://网关IP:8080` 有状态页、`/proxy.pac` 可自动配置、`/dns?host=` 查解析 |
@@ -67,15 +66,7 @@ adb shell pm install-commit $SID
 
 1. 网关卡片里点「启动 WireGuard」（端口默认 `51820/udp`）
 2. 卡片会显示服务端公钥 + 二维码，客户端用官方 WireGuard App 扫码，或点文字复制 `.conf` 导入
-3. 客户端里 `AllowedIPs = 0.0.0.0/0`，连上后整机流量（含 DNS、UDP、ICMP）都经网关出去
-
-> 服务端与客户端密钥由 App 自动生成并保存在本机；换密钥后旧配置立即失效。FOU 与 WireGuard 可以同时开。
-
-### 用 WireGuard 客户端连
-
-1. 网关卡片里点「启动 WireGuard」（端口默认 `51820/udp`）
-2. 卡片会显示服务端公钥 + 二维码，客户端用官方 WireGuard App 扫码，或点文字复制 `.conf` 导入
-3. 客户端里 `AllowedIPs = 0.0.0.0/0`，连上后整机流量（含 DNS、UDP、ICMP）都经网关出去
+3. 客户端里 `AllowedIPs = 0.0.0.0/0`，连上后整机流量（TCP/UDP、DNS）都经网关出去；ping 由网关本地应答
 
 > 服务端与客户端密钥由 App 自动生成并保存在本机；换密钥后旧配置立即失效。FOU 与 WireGuard 可以同时开。
 
@@ -108,7 +99,7 @@ adb shell pm install-commit $SID
                 互联网
 ```
 
-各入口的区别：SOCKS5 最通用（支持 UDP），HTTP 对浏览器和系统代理最省事，FOU 是网络层、给自带客户端模式用，WireGuard 是标准 VPN 协议、给任何平台的官方客户端用（全流量，含 UDP/ICMP）。
+各入口的区别：SOCKS5 最通用（支持 UDP），HTTP 对浏览器和系统代理最省事，FOU 是网络层、给自带客户端模式用，WireGuard 是标准 VPN 协议、给任何平台的官方客户端用（TCP/UDP 全流量，ICMP echo 本地应答）。
 
 ## 从源码构建
 

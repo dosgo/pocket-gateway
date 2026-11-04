@@ -91,21 +91,42 @@ func keyToHex(b64 string) (string, error) {
 //   - Read  = netstack 想发出去的 IP 包（会被加密送回 peer）
 //   - Write = peer 发来、已解密的 IP 包（注入 netstack 走转发）
 type wgTun struct {
-	ns     *netStack
-	mtu    int
-	events chan tun.Event
-	closed chan struct{}
-	once   sync.Once
+	ns      *netStack
+	mtu     int
+	events  chan tun.Event
+	out     chan []byte // netstack 要发出去的 IP 包
+	replies chan []byte // 本地自答的 ICMP echo reply（不进 netstack）
+	closed  chan struct{}
+	once    sync.Once
 }
 
 func newWgTun(ns *netStack, mtu int) *wgTun {
 	t := &wgTun{
-		ns:     ns,
-		mtu:    mtu,
-		events: make(chan tun.Event, 4),
-		closed: make(chan struct{}),
+		ns:      ns,
+		mtu:     mtu,
+		events:  make(chan tun.Event, 4),
+		out:     make(chan []byte, 256),
+		replies: make(chan []byte, 64),
+		closed:  make(chan struct{}),
 	}
 	t.events <- tun.EventUp
+
+	// netstack 的 read 是阻塞的，而 ICMP 应答不走 netstack，两者都得能被 Read 取到，
+	// 所以单独起一个泵把 netstack 的出包搬进 out，Read 用 select 同时等两路。
+	go func() {
+		for {
+			pkt, ok := ns.read()
+			if !ok {
+				close(t.out)
+				return
+			}
+			select {
+			case t.out <- pkt:
+			case <-t.closed:
+				return
+			}
+		}
+	}()
 	return t
 }
 
@@ -115,8 +136,15 @@ func (t *wgTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	if len(bufs) == 0 {
 		return 0, io.EOF
 	}
-	pkt, ok := t.ns.read()
-	if !ok {
+	var pkt []byte
+	select {
+	case pkt = <-t.replies:
+	case p, ok := <-t.out:
+		if !ok {
+			return 0, io.EOF
+		}
+		pkt = p
+	case <-t.closed:
 		return 0, io.EOF
 	}
 	n := copy(bufs[0][offset:], pkt)
@@ -132,7 +160,19 @@ func (t *wgTun) Write(bufs [][]byte, offset int) (int, error) {
 		if len(b) <= offset {
 			continue
 		}
-		t.ns.inject(b[offset:])
+		pkt := b[offset:]
+		// ICMP echo：netstack 里没有 ICMP 协议，直接本地回一个 reply，
+		// 这样客户端 ping 网关上看到的目标是通的（和 FOU 的行为一致）。
+		if len(pkt) > 20 && pkt[0]>>4 == 4 && pkt[9] == 1 {
+			if reply := icmpEchoReply(pkt); reply != nil {
+				select {
+				case t.replies <- reply:
+				default: // 队列满了就丢，别卡住 WireGuard 的收包协程
+				}
+				continue
+			}
+		}
+		t.ns.inject(pkt)
 	}
 	return len(bufs), nil
 }
@@ -246,8 +286,10 @@ func WgStart(cfgJSON string) error {
 			allowed = "0.0.0.0/0"
 		}
 		fmt.Fprintf(&sb, "public_key=%s\n", pub)
-		fmt.Fprintf(&sb, "allowed_ip=%s\n", allowed)
+		// replace_allowed_ips 必须写在 allowed_ip 之前：UAPI 里它是「先清空再加」，
+		// 放到后面会把刚加的 allowed_ip 全清掉，peer 变成只握手不过数据的哑巴。
 		sb.WriteString("replace_allowed_ips=true\n")
+		fmt.Fprintf(&sb, "allowed_ip=%s\n", allowed)
 		n++
 	}
 	if n == 0 {

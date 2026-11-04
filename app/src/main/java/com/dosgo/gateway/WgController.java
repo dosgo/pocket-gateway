@@ -176,6 +176,27 @@ public final class WgController {
                 + "PersistentKeepalive = 25\n";
     }
 
+    /**
+     * 把 Go 侧的日志环拉出来写进界面日志。
+     *
+     * <p>日志环原来是 FOU 的轮询线程在拉；只开 WireGuard、不开网关的时候没人拉，
+     * Go 侧的错误就彻底黑了，所以 WG 卡片刷新时也顺手拉一次（谁先拉谁拿到）。
+     */
+    public static void drainLogs() {
+        try {
+            String json = Fougw.logsJSON();
+            if (json == null || json.length() <= 2) {
+                return;
+            }
+            org.json.JSONArray arr = new org.json.JSONArray(json);
+            for (int i = 0; i < arr.length(); i++) {
+                Logs.add("WG " + arr.getString(i));
+            }
+        } catch (Throwable ignore) {
+            // Go 侧 panic 会以 Java 异常抛上来，必须兜住 Throwable
+        }
+    }
+
     /** Go 侧状态 JSON：running/port/peers(tx/rx/握手时间)/tcp/udp。 */
     public static String statsJson() {
         try {
