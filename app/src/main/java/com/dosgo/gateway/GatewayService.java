@@ -21,6 +21,8 @@ public class GatewayService extends Service {
 
     public static final String ACTION_START = "com.dosgo.gateway.action.START";
     public static final String ACTION_STOP = "com.dosgo.gateway.action.STOP";
+    /** 只补一次「自动开 AP」，不动已经在跑的代理端口（解锁后由 BootReceiver 触发）。 */
+    public static final String ACTION_AP_ENSURE = "com.dosgo.gateway.action.AP_ENSURE";
     public static final String EXTRA_SOCKS = "socks_port";
     public static final String EXTRA_HTTP = "http_port";
     public static final String EXTRA_FOU = "fou_port";
@@ -48,6 +50,15 @@ public class GatewayService extends Service {
             shutdown();
             return START_NOT_STICKY;
         }
+        if (intent != null && ACTION_AP_ENSURE.equals(intent.getAction())) {
+            // 解锁后再来一次：Direct Boot 阶段 Wi-Fi 经常还没就绪，AP 建不起来
+            if (running) {
+                ensureAutoAp();
+            } else {
+                startAll(lastSocksPort, lastHttpPort, lastFouPort);
+            }
+            return START_NOT_STICKY;
+        }
         int sp = intent == null ? lastSocksPort : intent.getIntExtra(EXTRA_SOCKS, lastSocksPort);
         int hp = intent == null ? lastHttpPort : intent.getIntExtra(EXTRA_HTTP, lastHttpPort);
         int fp = intent == null ? lastFouPort : intent.getIntExtra(EXTRA_FOU, lastFouPort);
@@ -55,6 +66,33 @@ public class GatewayService extends Service {
             startAll(sp, hp, fp);
         }
         return START_NOT_STICKY;
+    }
+
+    /**
+     * 按用户的「自动开」勾选把对应的 AP 打开（两个开关互斥）。
+     *
+     * 会被调两次：服务首次启动时一次；解锁后 {@code BOOT_COMPLETED} 再来一次。
+     * 因为 Direct Boot 阶段（还没解锁）Wi-Fi 常常没就绪，第一次多半建不起来，
+     * 第二次才是真正成功的那次。
+     */
+    private void ensureAutoAp() {
+        try {
+            if (P2pController.prefAuto(this)) {
+                if (!P2pController.active && !P2pController.isStarting()) {
+                    P2pController.resetRetry();   // 解锁后这一轮重新给满重试次数
+                    String err = P2pController.start(this, P2pController.FIXED_SSID,
+                            P2pController.FIXED_PASS);
+                    Logs.add(err == null
+                            ? "自动开 AP：已发起 Wi-Fi Direct 固定组（" + P2pController.FIXED_SSID + "）"
+                            : "Wi-Fi Direct 组未开启：" + err);
+                }
+            } else if (HotspotController.prefAuto(this) && !HotspotController.active) {
+                String err = HotspotController.start(this);
+                Logs.add(err == null ? "自动开 AP：已发起 Local-Only 热点" : "热点未开启：" + err);
+            }
+        } catch (Throwable t) {
+            Logs.add("自动开 AP 失败：" + t);
+        }
     }
 
     private void startAll(int sp, int hp, int fp) {
@@ -88,26 +126,7 @@ public class GatewayService extends Service {
         String ip = NetUtils.primaryIp();
         Logs.add("网关已就绪，本机 IP " + (ip == null ? "未知" : ip));
 
-        // 按用户的「自动开」勾选，把对应的 AP 打开。
-        // 两个开关互斥：勾了 Wi-Fi Direct 就不再开 Local-Only 热点，反之亦然。
-        try {
-            if (P2pController.prefAuto(this)) {
-                if (!P2pController.active) {
-                    String err = P2pController.start(this, P2pController.FIXED_SSID,
-                            P2pController.FIXED_PASS);
-                    Logs.add(err == null
-                            ? "自启：已发起 Wi-Fi Direct 固定组（" + P2pController.FIXED_SSID + "）"
-                            : "Wi-Fi Direct 组未开启：" + err);
-                }
-            } else if (HotspotController.prefAuto(this) && !HotspotController.active) {
-                String err = HotspotController.start(this);
-                if (err != null) {
-                    Logs.add("热点未开启：" + err);
-                }
-            }
-        } catch (Throwable t) {
-            Logs.add("自动开 AP 失败：" + t);
-        }
+        ensureAutoAp();
 
         running = true;
         updateNotification(ip);

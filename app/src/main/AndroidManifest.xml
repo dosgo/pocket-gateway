@@ -34,9 +34,13 @@
             </intent-filter>
         </activity>
 
+        <!-- 网关服务。
+             directBootAware：解锁前（Direct Boot 阶段）也能被拉起 —— 这是「开机不自启」的关键，
+             否则系统会一直等到用户解锁后才允许这些组件运行。 -->
         <service
             android:name=".GatewayService"
             android:exported="false"
+            android:directBootAware="true"
             android:foregroundServiceType="dataSync" />
 
         <!-- 客户端模式：另一台设备装同一个 App，用它把整机流量转给网关 -->
@@ -48,12 +52,17 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
-        <!-- 开机自启：勾了「开机自动启动网关」才会真的启动服务 -->
+        <!-- 开机自启：勾了「开机自动启动网关」才会真的启动服务。
+             LOCKED_BOOT_COMPLETED 在「解密完成、但用户还没解锁」时就派发，
+             只有 directBootAware 的接收器能收到；BOOT_COMPLETED 才是解锁之后那条。
+             两条都收：前者尽量早启动，后者兜底（解锁前 Wi-Fi 可能还没就绪）。 -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
-            android:exported="true">
-            <intent-filter>
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />

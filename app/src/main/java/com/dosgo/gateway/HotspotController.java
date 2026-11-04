@@ -71,7 +71,8 @@ public final class HotspotController {
     // ------------------------------------------------------------ prefs
 
     public static SharedPreferences prefs(Context ctx) {
-        return ctx.getApplicationContext().getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        // 放 DE 存储：开机解锁前也要能读到「自动开热点」这个开关
+        return AppPrefs.dp(ctx, PREF);
     }
 
     public static String prefSsid(Context ctx) {

@@ -34,6 +34,9 @@ public class P2pController {
 
     private static WifiP2pManager mgr;
     private static WifiP2pManager.Channel chan;
+    /** 建组失败的重试计数：开机阶段 Wi-Fi P2P 服务常还没就绪，前几次会直接返回 ERROR。 */
+    private static int retry = 0;
+    private static final int MAX_RETRY = 3;
 
     // ------------------------------------------------------------ prefs（是否「启动网关时自动开组」）
 
@@ -41,15 +44,12 @@ public class P2pController {
     private static final String KEY_AUTO = "auto";
 
     public static boolean prefAuto(Context ctx) {
-        return ctx.getApplicationContext()
-                .getSharedPreferences(PREF, Context.MODE_PRIVATE)
-                .getBoolean(KEY_AUTO, false);
+        // DE 存储：开机解锁前也要能读到「自动开固定组」这个开关
+        return AppPrefs.dp(ctx, PREF).getBoolean(KEY_AUTO, false);
     }
 
     public static void setPrefAuto(Context ctx, boolean v) {
-        ctx.getApplicationContext()
-                .getSharedPreferences(PREF, Context.MODE_PRIVATE)
-                .edit().putBoolean(KEY_AUTO, v).apply();
+        AppPrefs.dp(ctx, PREF).edit().putBoolean(KEY_AUTO, v).apply();
     }
 
     public static synchronized String start(Context ctx, final String name, final String passphrase) {
@@ -98,6 +98,7 @@ public class P2pController {
                 @Override
                 public void onSuccess() {
                     starting = false;
+                    retry = 0;
                     Logs.add("P2P createGroup 返回成功，等组信息…");
                     mgr.requestGroupInfo(chan, new WifiP2pManager.GroupInfoListener() {
                         @Override
@@ -129,10 +130,25 @@ public class P2pController {
                 }
 
                 @Override
-                public void onFailure(int reason) {
+                public void onFailure(final int reason) {
                     active = false;
                     starting = false;
                     Logs.add("P2P createGroup 失败 reason=" + reason + " (" + reasonText(reason) + ")");
+                    // 刚开机（尤其解锁瞬间）P2P 服务往往还没就绪，直接返回 ERROR。
+                    // 这里只做有限次重试，不是常驻守护：三次都不行就认输，等用户手动点。
+                    if (wantActive && retry < MAX_RETRY) {
+                        retry++;
+                        final int n = retry;
+                        Logs.add("P2P 建组重试中（第 " + n + "/" + MAX_RETRY + " 次，2.5 秒后）");
+                        new android.os.Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (wantActive && !active && !starting) {
+                                    start(app, name, passphrase);
+                                }
+                            }
+                        }, 2500L);
+                    }
                 }
             });
             return null;
@@ -147,10 +163,16 @@ public class P2pController {
         return starting;
     }
 
+    /** 重置失败计数：「解锁后再补一次」这种新一轮尝试要重新给满次数。 */
+    public static void resetRetry() {
+        retry = 0;
+    }
+
     public static synchronized void stop() {
         active = false;
         starting = false;
         wantActive = false;
+        retry = 0;
         if (mgr == null || chan == null) {
             return;
         }
