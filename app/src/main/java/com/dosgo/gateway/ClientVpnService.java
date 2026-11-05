@@ -62,12 +62,28 @@ public class ClientVpnService extends VpnService {
     private Thread downThread;
     private android.net.ConnectivityManager.NetworkCallback netCb;
     private long lastKickMs = 0L;
+    /** 泵线程代际号：restartSelf() 会换一个新 TUN，旧泵线程必须立刻退出。 */
+    private volatile long pumpGen = 0L;
     private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Android 8+ 用 startForegroundService() 拉起服务后，必须在 5 秒内调用
+        // startForeground()，否则系统抛 ForegroundServiceDidNotStartInTimeException
+        // 直接杀掉整个进程 —— 表现就是「点一下客户端隧道，App 直接闪退」。
+        // 所以第一件事无条件挂前台通知，绝不能放在 b.establish() 之后：
+        // VPN 授权被别的 App 占用、或者 establish() 抛异常时，那条路径根本走不到。
+        if (intent == null || !ACTION_STOP.equals(intent.getAction())) {
+            if (!foreground()) {
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+        }
         if (intent == null) {
-            return START_STICKY;
+            // 被系统重启但没有 Intent：没有网关地址可用，不要留一个空壳服务
+            Logs.add("客户端隧道重启缺少参数，已停止");
+            stopSelf();
+            return START_NOT_STICKY;
         }
         if (ACTION_STOP.equals(intent.getAction())) {
             stopTunnel();
@@ -83,12 +99,27 @@ public class ClientVpnService extends VpnService {
             return START_NOT_STICKY;
         }
         startTunnel(gw.trim(), port);
+        if (!running) {
+            // establish() 失败或抛异常：收尾，别留一个没有隧道的僵尸前台服务
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         return START_STICKY;
     }
 
     private void startTunnel(String gw, int port) {
         stopTunnel();
         try {
+            // MainActivity 已请求过授权，但服务也可能被开机广播 / 外部 Intent
+            // 直接拉起。授权被系统撤销或别的 VPN 占用时，establish() 会抛
+            // SecurityException —— 提前判掉，给可读错误而不是静默失败。
+            Intent prep = VpnService.prepare(this);
+            if (prep != null) {
+                lastError = "VPN 授权失效，请在 App 里重新点「启动客户端隧道」";
+                Logs.add("客户端隧道建立失败：" + lastError);
+                closeQuietly();
+                return;
+            }
             Builder b = new Builder();
             b.setSession("网关客户端");
             b.setMtu(TUN_MTU);
@@ -113,7 +144,14 @@ public class ClientVpnService extends VpnService {
             upPkts = downPkts = upBytes = downBytes = 0;
             lastError = "";
             running = true;
-            foreground();
+            // 重复 startForeground 是合法的：这次只是把通知文案从「正在启动」
+            // 更新成真实网关地址。restartSelf() 也走这条路重新挂通知。
+            if (!foreground()) {
+                lastError = "前台服务通知更新失败";
+                Logs.add("客户端前台通知更新失败");
+                closeQuietly();
+                return;
+            }
             Logs.add("客户端隧道已启动 → " + gw + ":" + port + "（整机流量走 FOU，无需配置系统代理）");
             // socket 的创建/连接放在泵线程里（主线程做网络操作会抛 NetworkOnMainThreadException）
             startPumpLoop();
@@ -131,6 +169,14 @@ public class ClientVpnService extends VpnService {
      * 这里靠「send 抛错 / receive 抛错 / 系统网络回调」三处触发重连。
      */
     private void startPumpLoop() {
+        if (tun == null) {
+            return;
+        }
+        // 每次建隧道领一个代际号。旧泵线程可能阻塞在旧 TUN 的 read() 上，
+        // 关掉 fd 后会抛 EBADF 并进入重连循环；只看 running 的话，
+        // startTunnel() 把 running 重新置 true 后旧线程会「复活」，
+        // 和新泵线程并存，每 1.5s 无限重连刷日志、抢 socket。
+        final long myGen = ++pumpGen;
         final FileInputStream in = new FileInputStream(tun.getFileDescriptor());
         final FileOutputStream out = new FileOutputStream(tun.getFileDescriptor());
         upThread = new Thread(new Runnable() {
@@ -138,7 +184,7 @@ public class ClientVpnService extends VpnService {
             public void run() {
                 byte[] upBuf = new byte[BUF];
                 DatagramPacket upPkt = new DatagramPacket(upBuf, upBuf.length);
-                while (running) {
+                while (running && myGen == pumpGen) {
                     DatagramSocket s = null;
                     Thread down = null;
                     try {
@@ -161,7 +207,7 @@ public class ClientVpnService extends VpnService {
                                 // 复用同一个包对象：每包 new DatagramPacket 在几千 pps 下
                                 // 会制造明显的 GC 抖动，直接表现为吞吐周期性掉坑
                                 DatagramPacket dp = new DatagramPacket(b, b.length);
-                                while (running) {
+                                while (running && myGen == pumpGen) {
                                     try {
                                         // receive() 会把 length 改成实际收到长度，下次必须复位
                                         dp.setLength(b.length);
@@ -178,7 +224,7 @@ public class ClientVpnService extends VpnService {
                         }, "gw-vpn-down");
                         down.start();
                         downThread = down;
-                        while (running) {
+                        while (running && myGen == pumpGen) {
                             int n = in.read(upBuf);
                             if (n <= 0) {
                                 continue;
@@ -213,7 +259,7 @@ public class ClientVpnService extends VpnService {
                             }
                         }
                     }
-                    if (!running) {
+                    if (!running || myGen != pumpGen) {
                         break;
                     }
                     try {
@@ -296,6 +342,11 @@ public class ClientVpnService extends VpnService {
                     }, 1500);
                 }
             };
+            // 刚 establish VPN 时系统会立刻回调一次 onAvailable（VPN 成为默认网络）。
+            // MIUI 上这次回调的 NetworkCapabilities 常常不带 TRANSPORT_VPN，
+            // 光靠 hasTransport 过滤不住，会把刚建好的隧道自己踢掉重启一次。
+            // 把节流起点设为注册时刻，5 秒内的回调一律忽略。
+            lastKickMs = System.currentTimeMillis();
             cm.registerDefaultNetworkCallback(netCb);
         } catch (Throwable t) {
             Logs.add("注册网络回调失败（不影响隧道）：" + t);
@@ -329,6 +380,9 @@ public class ClientVpnService extends VpnService {
 
     private void closeQuietly() {
         running = false;
+        // 作废所有在跑的泵线程：restartSelf() 里 running 会被重新置 true，
+        // 必须靠代际号让旧线程退出，不能只依赖 running。
+        pumpGen++;
         unwatchNetwork();
         if (udp != null) {
             try {
@@ -352,9 +406,13 @@ public class ClientVpnService extends VpnService {
         }
     }
 
-    private void foreground() {
+    /** 返回 false 表示系统拒绝了前台服务，此时必须 stopSelf()，否则 5 秒后被杀。 */
+    private boolean foreground() {
         try {
             String ch = "gateway_client";
+            String text = (gwIp == null || gwIp.isEmpty())
+                    ? "正在启动客户端隧道…"
+                    : "整机流量经 " + gwIp + ":" + gwPort + " 转发";
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             if (nm != null && Build.VERSION.SDK_INT >= 26) {
                 NotificationChannel c = new NotificationChannel(ch, "客户端隧道",
@@ -368,7 +426,7 @@ public class ClientVpnService extends VpnService {
             if (Build.VERSION.SDK_INT >= 26) {
                 n = new Notification.Builder(this, ch)
                         .setContentTitle("网关客户端")
-                        .setContentText("整机流量经 " + gwIp + ":" + gwPort + " 转发")
+                        .setContentText(text)
                         .setSmallIcon(android.R.drawable.stat_sys_download_done)
                         .setContentIntent(pi)
                         .setOngoing(true)
@@ -376,15 +434,19 @@ public class ClientVpnService extends VpnService {
             } else {
                 n = new Notification.Builder(this)
                         .setContentTitle("网关客户端")
-                        .setContentText("整机流量经 " + gwIp + ":" + gwPort + " 转发")
+                        .setContentText(text)
                         .setSmallIcon(android.R.drawable.stat_sys_download_done)
                         .setContentIntent(pi)
                         .setOngoing(true)
                         .build();
             }
             startForeground(1002, n);
+            return true;
         } catch (Throwable t) {
-            Logs.add("客户端前台通知失败（不影响 tunnel）：" + t);
+            // 这里绝不能写「不影响 tunnel」：startForeground 失败 = 系统会杀进程。
+            Logs.add("客户端前台服务启动失败（系统拒绝，必须停止服务）：" + t);
+            lastError = "前台服务启动失败：" + t;
+            return false;
         }
     }
 

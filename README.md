@@ -75,6 +75,24 @@ adb shell pm install-commit $SID
 1. 另一台设备装同一个 App，在「客户端」卡片里填网关 IP（固定组默认 `192.168.49.1`）
 2. 点「开启客户端隧道」，授权 VPN 即可
 
+#### 客户端模式稳定性修复（3.7 后续）
+
+- **点「开启客户端隧道」直接闪退**：Android 8+ 用 `startForegroundService()` 拉起服务后，
+  必须在 5 秒内调用 `startForeground()`，否则系统抛
+  `ForegroundServiceDidNotStartInTimeException` 直接杀进程。原实现把 `startForeground()`
+  放在 `VpnService.Builder.establish()` **之后** —— VPN 授权被别的 App 占用或
+  `establish()` 抛异常时根本走不到，异常还被 `catch` 吞掉写成「不影响 tunnel」。
+  现在 `onStartCommand()` 第一件事就无条件挂前台通知，失败路径一律 `stopSelf()`；
+  并补了 `VpnService.prepare()` 二次校验、`startPumpLoop()` 的 TUN 判空。
+  `AndroidManifest.xml` 也给 `ClientVpnService` 补上 `foregroundServiceType="dataSync"`
+  （GatewayService 早就有，客户端缺这个在 Android 14+ 会被系统拒绝）。
+- **网络切换后旧泵线程不退出**：`restartSelf()` 换 TUN 时 `running` 会被重新置 true，
+  旧泵线程拿着已关闭的 fd 每 1.5 秒报一次 `EBADF` 无限重连，和新泵线程并存抢 socket。
+  现用 `pumpGen` 代际号让旧代线程立即退出；注册网络回调时把节流起点设为当前时间，
+  避免「VPN 刚成为默认网络」的那次 `onAvailable` 把自己踢掉重启。
+- 验证（真机 Android 17）：adb 触发 `vpn_on` 后进程 pid 全程不变、crash buffer 为空，
+  `EBADF` / 自踢重启计数 0；`vpn_off` 后网关服务、UDP 5555 / 51820 均正常恢复。
+
 ### 开机自动
 
 「自启动」卡片勾「开机自动启动网关」，热点卡片再勾一项「启动网关时自动开…」（两种热点互斥）。
