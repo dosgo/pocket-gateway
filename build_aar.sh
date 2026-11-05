@@ -33,19 +33,14 @@ export TEMP="$TMP"
 export TMPDIR="$TMP"
 export GOTMPDIR="$TMP"
 
-# 10808 代理没开时硬设 HTTPS_PROXY 会让 goproxy.cn 也连不上、go mod tidy 卡住。
-if (exec 3<>/dev/tcp/127.0.0.1/10808) 2>/dev/null; then
-  exec 3<&- 3>&-
-  export HTTPS_PROXY=http://127.0.0.1:10808
-  export HTTP_PROXY=http://127.0.0.1:10808
-  echo "代理 10808 可用，已启用"
-else
-  unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
-  echo "代理 10808 不可用，走 goproxy.cn 直连"
-fi
+# 绝不设 HTTPS_PROXY / HTTP_PROXY：本机 10808 端口即使在监听，代理本身也可能不通，
+# gomobile 内部的 go mod tidy 一旦走它就无限等（实测 5m45s 零输出）。
+# Go 有自己的模块代理 GOPROXY；依赖已全部缓存在 $GOPATH/pkg/mod，正常构建不联网。
+unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ALL_PROXY all_proxy
 # 临时目录里的 go mod tidy 会重下整棵依赖树；sumdb 校验在 Windows 临时目录下会报
-# "Access is denied"，关掉校验；模块代理用国内源（proxy.golang.org 经常 502）
-export GOPROXY=https://goproxy.cn,direct
+# "Access is denied"，关掉校验。默认离线：只用本地缓存，缺依赖时立刻报错而不是干等；
+# 确实要补依赖时手动改成 GOPROXY=https://goproxy.cn,direct 再跑一次，仍不需要本机代理。
+export GOPROXY=off
 export GOSUMDB=off
 export GONOSUMDB='*'
 

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,6 +36,10 @@ type netStack struct {
 	s  *stack.Stack
 	ep *channel.Endpoint
 	g  *Gateway
+
+	// 新建协议栈后的一小段时间内拒绝 QUIC 孤儿包，详见 handleUDP。
+	orphanUntil  time.Time
+	orphanLogged atomic.Bool
 }
 
 func newNetStack(mtu uint32, g *Gateway) (*netStack, error) {
@@ -97,7 +102,12 @@ func newNetStack(mtu uint32, g *Gateway) (*netStack, error) {
 		Min: 4096, Default: 1 << 20, Max: 8 << 20,
 	})
 
-	ns := &netStack{s: s, ep: ep, g: g}
+	ns := &netStack{
+		s:           s,
+		ep:          ep,
+		g:           g,
+		orphanUntil: time.Now().Add(orphanRejectWindow),
+	}
 
 	// 没有 listener 挡在前面的连接，全部交给我们的 forwarder
 	tcpFwd := tcp.NewForwarder(s, 0, 4096, ns.handleTCP)
@@ -105,6 +115,7 @@ func newNetStack(mtu uint32, g *Gateway) (*netStack, error) {
 	udpFwd := udp.NewForwarder(s, ns.handleUDP)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 
+	jlog("QUIC 孤儿包拒绝窗口已开启（%.0f 秒，仅 UDP/443）", orphanRejectWindow.Seconds())
 	return ns, nil
 }
 
@@ -252,10 +263,29 @@ func copyBuffered(dst io.Writer, src io.Reader) {
 
 // ---------------------------------------------------------------- UDP
 
+// 网关每次 Start() 都会新建协议栈，所以窗口以「协议栈创建时刻」为起点，
+// 重启 App / 改端口重启网关都会重新计时。
+// 取 10 秒：足够覆盖旧连接在新栈起来后的第一波 PTO 重传，又不至于让
+// 正常新建的 QUIC 被拒太久（窗口内新建连接会失败，QUIC 重试很快恢复）。
+const orphanRejectWindow = 10 * time.Second
+
 // handleUDP 返回 false 表示"没接手"，协议栈会回 ICMP 端口不可达。
 func (n *netStack) handleUDP(f *udp.ForwarderRequest) bool {
 	defer recoverLog("handleUDP")
 	id := f.ID()
+
+	// App 重启后，下游设备上 ESTABLISHED 的 QUIC 连接并没有断（WiFi 也没断），
+	// 会继续把 1-RTT 包发过来。新 netstack 里没有对应 endpoint，若照常接手，
+	// 这些包会被当成新会话转发到一个早已失效的 Connection ID，客户端收不到
+	// 任何失败信号，只能干等自己的 idle timeout 才重建。启动后的窗口内对
+	// UDP/443 一律回绝，让 gVisor 回 ICMP 端口不可达，客户端立刻重建连接。
+	// 只限 443：DNS(53) 等其它 UDP 不受影响；TCP 侧 netstack 本来就自动回 RST。
+	if id.LocalPort == 443 && time.Now().Before(n.orphanUntil) {
+		if n.orphanLogged.CompareAndSwap(false, true) {
+			jlog("检测到重启后的 QUIC 孤儿包，已回 ICMP 端口不可达让客户端重建连接")
+		}
+		return false
+	}
 
 	var wq waiter.Queue
 	ep, terr := f.CreateEndpoint(&wq)
