@@ -4,6 +4,15 @@
 set -e
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 宿主进程会把 TMP/TEMP/TMPDIR 指到自己的更新临时目录，归档目录和
+# aapt/d8/apksigner 的临时文件会落进去被清理掉。统一改到项目内稳定目录。
+TMP_POSIX="$APP_DIR/.tmp"
+mkdir -p "$TMP_POSIX"
+export TMP="$(cygpath -w "$TMP_POSIX")"
+export TEMP="$TMP"
+export TMPDIR="$TMP"
+
 SDK="/c/Users/DosGo/AppData/Local/Android/Sdk"
 BT="$SDK/build-tools/35.0.0"
 ANDROID_JAR="$SDK/platforms/android-33/android.jar"
@@ -26,7 +35,7 @@ export PATH="$JAVA_HOME_DIR/bin:$PATH"
 
 cd "$APP_DIR"
 # 旧产物只移走、不删除：批量删除会被安全策略拦下，而且留一份也方便回滚
-OLDBUILD="$(mktemp -d)"
+OLDBUILD="$(mktemp -d -p "$TMP_POSIX")"
 if [ -d build ]; then mv build "$OLDBUILD/"; fi
 if [ -d app/src/main/jniLibs ]; then mv app/src/main/jniLibs "$OLDBUILD/"; fi
 mkdir -p build/res build/gen build/classes build/dex

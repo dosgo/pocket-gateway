@@ -1,6 +1,7 @@
 # ---- 构建产物 ----
 build/
 build_dbg/
+.tmp/
 *.apk
 *.apk.idsig
 *.aab

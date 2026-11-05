@@ -35,6 +35,13 @@ func sameAddr(a, b *net.UDPAddr) bool {
 	return a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
 }
 
+func kib(v int) string {
+	if v < 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%dKB", v>>10)
+}
+
 // Gateway 是 FOU 网关实例：一个 UDP 监听 + 一个 gVisor netstack。
 type Gateway struct {
 	conn    *net.UDPConn
@@ -95,8 +102,27 @@ func Start(cfgJSON string) error {
 	if err != nil {
 		return fmt.Errorf("FOU 端口 %d 绑定失败: %v", cfg.Port, err)
 	}
-	conn.SetReadBuffer(4 << 20)
-	conn.SetWriteBuffer(4 << 20)
+	// FOU 外层是 UDP：缓冲一满丢掉的就是内层 TCP 包，不重传、直接退窗。
+	// setsockopt 会被内核的 rmem_max / wmem_max 静默截断，所以读回实际值
+	// 打进日志，免得「以为设了 4MB、其实只有 200KB」却查不出来。
+	const wantBuf = 4 << 20
+	if err := conn.SetReadBuffer(wantBuf); err != nil {
+		jlog("FOU UDP 读缓冲设置失败: %v", err)
+	}
+	if err := conn.SetWriteBuffer(wantBuf); err != nil {
+		jlog("FOU UDP 写缓冲设置失败: %v", err)
+	}
+	if raw, err := conn.SyscallConn(); err == nil {
+		rx, tx := sockBufSizes(raw)
+		if rx >= 0 {
+			rmax := sysctlMax("/proc/sys/net/core/rmem_max")
+			wmax := sysctlMax("/proc/sys/net/core/wmem_max")
+			jlog("FOU UDP socket 缓冲：申请 %dKB，实际 rx=%dKB tx=%dKB（内核上限 rx=%s tx=%s）",
+				wantBuf>>10, rx>>10, tx>>10, kib(rmax), kib(wmax))
+		} else {
+			jlog("FOU UDP socket 缓冲：申请 %dKB（当前平台读不回实际值）", wantBuf>>10)
+		}
+	}
 
 	g := &Gateway{
 		conn:    conn,

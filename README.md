@@ -112,9 +112,15 @@ FOU 链路的端到端 RTT 通常是蜂窝 RTT + 两层用户态转发 + 空口�
 | `gostack/fougw/netstack.go` | 拥塞控制 Reno → **CUBIC** | 窗口增长与 RTT 解耦，丢包后恢复快得多（Linux 默认算法） |
 | 同上 | `io.Copy` → `io.CopyBuffer` + `sync.Pool` 64KB | 每条连接少两次 32KB 分配，降低并发时的 GC 抖动 |
 | `gostack/fougw/gateway.go` | 隧道索引 key 由 `"ip:port"` 字符串 → `[4]byte + uint16` 结构 | 每个包少 3 次堆分配；收包热路径从全局写锁降为读锁 + 一次原子写 |
-| `ClientVpnService.java` | FOU UDP socket 收发缓冲申请 1MB，复用 `DatagramPacket` | Android 默认 UDP 缓冲只有一两百 KB，蜂窝侧突发会灌满并丢包；UDP 丢一个内层 TCP 就退窗 |
+| `ClientVpnService.java` | FOU UDP socket 收发缓冲申请 1MB，复用 `DatagramPacket` | **仅客户端模式**；Android 默认 UDP 缓冲只有一两百 KB，蜂窝侧突发会灌满并丢包 |
+| `gostack/fougw/gateway.go` | 把 UDP socket 的实际收发缓冲读回并打日志 | 网关模式收 FOU 包的 socket 在 Go 侧，早就申请了 4MB，但 `SetReadBuffer` 会被内核静默截断，之前无从确认 |
 
-启动后 App 日志会打 `FOU socket 缓冲 rx=…B tx=…B（申请 1048576B）`。内核会按 `net.core.rmem_max` / `wmem_max` 截断，读回值明显小于申请值说明被系统限制了，这是 ROM 限制、App 改不动。
+启动日志（App 状态页，或 `adb logcat -s Gateway:I`）：
+
+- **网关模式**（手机跑 FOU 服务端）：`WG TCP 拥塞控制 = cubic…`，以及 `FOU UDP socket 缓冲：申请 4096KB，实际 rx=…KB tx=…KB（内核上限 rx=…KB tx=…KB）`。注意 Linux 的 `SO_RCVBUF`/`SO_SNDBUF` 读回值含 skb 开销，约为申请值的 2 倍（8MB）属正常；明显不到就说明被 ROM 的 `rmem_max`/`wmem_max` 截断了，App 改不动。
+- **客户端模式**（另一台设备）：才有 Java 层的 `FOU socket 缓冲 rx=…B tx=…B（申请 1048576B）`。
+
+Windows 桌面 CLI 读不到实际值，日志会显示「当前平台读不回实际值」。
 
 **怎么判断瓶颈在哪一侧**（配合 ESP32 固件的 `http://192.168.4.1/speed` 端点，它由 ESP32 本地生成 4MB 数据，完全绕开 FOU / 手机 / 蜂窝）：
 
