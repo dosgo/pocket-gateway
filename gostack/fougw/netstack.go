@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -164,7 +165,27 @@ func (n *netStack) relayTCP(conn *gonet.TCPConn, dst string, dport uint16,
 	defer conn.Close()
 
 	target := net.JoinHostPort(dst, strconv.Itoa(int(dport)))
-	real, err := net.DialTimeout("tcp", target, 10*time.Second)
+
+	// ---- 段2：出站真实 socket（Android 内核 TCP + 蜂窝）----------------
+	// 之前只设了 TCP_NODELAY，从没动过收发缓冲。内核默认 SO_RCVBUF 只有
+	// 几十 KB，单连接吞吐被死死压在「接收窗口 / RTT」上：蜂窝 RTT 约
+	// 100~150ms，64KB / 0.15s ≈ 430KB/s —— 和实测的 380~400KB/s 几乎重合。
+	//
+	// 关键：window scale 是 connect() 的 SYN 里协商的，连接建立之后再
+	// SetReadBuffer 已经改不了 scale，所以必须用 Dialer.Control 在 connect
+	// 之前 setsockopt。之前改的 CUBIC / 1MB gVisor 窗口都在段1，
+	// 对这一段完全不起作用。
+	d := net.Dialer{
+		Timeout: 10 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			// 失败也不阻断连接：内核只是按 rmem_max/wmem_max 静默截断
+			_ = c.Control(func(fd uintptr) {
+				setOutTCPBuf(fd)
+			})
+			return nil
+		},
+	}
+	real, err := d.Dial("tcp", target)
 	if err != nil {
 		jlog("TCP %s:%d -> %s 连接失败: %v", src, sport, target, err)
 		return
@@ -172,6 +193,7 @@ func (n *netStack) relayTCP(conn *gonet.TCPConn, dst string, dport uint16,
 	defer real.Close()
 	if tc, ok := real.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
+		logOnceTCPBuf(tc)
 	}
 	if n.g.verbose {
 		jlog("TCP %s:%d -> %s 已建立", src, sport, target)
@@ -192,6 +214,24 @@ func (n *netStack) relayTCP(conn *gonet.TCPConn, dst string, dport uint16,
 		conn.CloseWrite()
 	}()
 	wg.Wait()
+}
+
+// 出站 TCP socket 目标缓冲。内核读回值约为申请值的 2 倍（含 skb 开销）属正常。
+const outTCPBuf = 2 << 20
+
+var tcpBufOnce sync.Once
+
+// 只打一次，避免每条连接都刷日志。
+func logOnceTCPBuf(tc *net.TCPConn) {
+	tcpBufOnce.Do(func() {
+		sc, err := tc.SyscallConn()
+		if err != nil {
+			return
+		}
+		rx, tx := sockBufSizes(sc)
+		jlog("出站 TCP socket 缓冲：申请 %dKB，实际 rx=%dKB tx=%dKB（内核上限会截断）",
+			outTCPBuf/1024, rx/1024, tx/1024)
+	})
 }
 
 // io.Copy 默认只用 32KB 缓冲，每条连接每个方向都要分配一次；

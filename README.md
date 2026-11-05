@@ -120,14 +120,11 @@ FOU 链路的端到端 RTT 通常是蜂窝 RTT + 两层用户态转发 + 空口�
 - **网关模式**（手机跑 FOU 服务端）：`WG TCP 拥塞控制 = cubic…`，以及 `FOU UDP socket 缓冲：申请 4096KB，实际 rx=…KB tx=…KB（内核上限 rx=…KB tx=…KB）`。注意 Linux 的 `SO_RCVBUF`/`SO_SNDBUF` 读回值含 skb 开销，约为申请值的 2 倍（8MB）属正常；明显不到就说明被 ROM 的 `rmem_max`/`wmem_max` 截断了，App 改不动。
 - **客户端模式**（另一台设备）：才有 Java 层的 `FOU socket 缓冲 rx=…B tx=…B（申请 1048576B）`。
 
-Windows 桌面 CLI 读不到实际值，日志会显示「当前平台读不回实际值」。
+缓冲读回 / 设置逻辑放在 `sockbuf_unix.go`，build tag 为 `linux || android`；项目没有 Windows 平台实现——gomobile 交叉编译的目标本来就是 android/arm*，宿主 Windows 不参与编译。
 
-**怎么判断瓶颈在哪一侧**（配合 ESP32 固件的 `http://192.168.4.1/speed` 端点，它由 ESP32 本地生成 4MB 数据，完全绕开 FOU / 手机 / 蜂窝）：
-
-| `/speed` 结果 | 结论 |
-| --- | --- |
-| ≥ 1MB/s，但上网仍只有几百 KB/s | 空口和 ESP32 清白，瓶颈在手机蜂窝 RTT / TCP 栈 —— 正是 CUBIC 要对症的场景 |
-| 也只有几百 KB/s | 瓶颈在 2.4G 空口，去固件网页试 1/6/11 信道 × 20/40MHz |
+**怎么判断瓶颈在哪一侧**：以手机实际下载测速为准，固件不提供测速端点。
+切 1/6/11 信道 × 20/40MHz 前后各测一次，速度基本不变就说明瓶颈不在 2.4G 空口，
+而在手机蜂窝 RTT / TCP 栈（CUBIC 对症的场景）。
 
 另一个快速判据：用多线程下载工具（4–8 连接）下同一个大文件。总速度随连接数上涨 = 单连接被 cwnd / RTT 卡住；总速度不动 = 链路级上限。
 
