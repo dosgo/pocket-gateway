@@ -71,7 +71,20 @@ func newNetStack(mtu uint32, g *Gateway) (*netStack, error) {
 		{Destination: header.IPv4EmptySubnet, NIC: 1},
 	})
 
-	// 大缓冲 + SACK：单条连接跑满局域网带宽
+	// ---- TCP 参数 ----------------------------------------------------
+	// gVisor 的 tcp.NewProtocol 默认用 Reno。Reno 丢一次包就把 cwnd 砍半，
+	// 之后每个 RTT 只涨 1 个 MSS；本链路（蜂窝 + 两层用户态转发 + 两跳
+	// 2.4G）端到端 RTT 常在 150ms 上下，恢复一次要几十个 RTT，单连接吞吐
+	// 会被死死压在几百 KB/s。CUBIC 的窗口增长只跟时间有关、与 RTT 解耦，
+	// 是 Linux 默认算法，高 BDP 链路上的恢复速度远好于 Reno。
+	cc := tcpip.CongestionControlOption("cubic")
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &cc); err != nil {
+		return nil, fmt.Errorf("启用 CUBIC 失败: %v", err)
+	}
+	jlog("TCP 拥塞控制 = cubic（SACK / RACK 保持开启）")
+
+	// 接收窗口已经是 1MB 且关掉了自动调优（避免在长 RTT 链路上慢慢爬窗口），
+	// 所以瓶颈不在窗口大小，而在上面的拥塞控制。
 	sack := tcpip.TCPSACKEnabled(true)
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &sack)
 	moderate := tcpip.TCPModerateReceiveBufferOption(false)
@@ -168,17 +181,33 @@ func (n *netStack) relayTCP(conn *gonet.TCPConn, dst string, dport uint16,
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(real, conn)
+		copyBuffered(real, conn)
 		if tc, ok := real.(*net.TCPConn); ok {
 			tc.CloseWrite()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(conn, real)
+		copyBuffered(conn, real)
 		conn.CloseWrite()
 	}()
 	wg.Wait()
+}
+
+// io.Copy 默认只用 32KB 缓冲，每条连接每个方向都要分配一次；
+// 并发连接一多就是持续的 GC 压力。这里换成对象池里的 64KB 缓冲，
+// 既减少分配，也减少 gVisor endpoint 的唤醒次数。
+var copyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64<<10)
+		return &b
+	},
+}
+
+func copyBuffered(dst io.Writer, src io.Reader) {
+	bp := copyBufPool.Get().(*[]byte)
+	io.CopyBuffer(dst, src, *bp)
+	copyBufPool.Put(bp)
 }
 
 // ---------------------------------------------------------------- UDP

@@ -101,6 +101,30 @@ adb shell pm install-commit $SID
 
 各入口的区别：SOCKS5 最通用（支持 UDP），HTTP 对浏览器和系统代理最省事，FOU 是网络层、给自带客户端模式用，WireGuard 是标准 VPN 协议、给任何平台的官方客户端用（TCP/UDP 全流量，ICMP echo 本地应答）。
 
+## 性能调优（3.7）
+
+FOU 链路的端到端 RTT 通常是蜂窝 RTT + 两层用户态转发 + 空口，常在 150ms 上下。这种「长肥链路」下，**单条 TCP 的吞吐由拥塞控制算法决定，不是由接收窗口决定** —— 窗口早在 3.6 就已经是 1MB 并关掉了自动调优，但 gVisor 的 `tcp.NewProtocol` 默认跑 **Reno**：丢一个包 cwnd 砍半，之后每个 RTT 只涨 1 个 MSS，恢复一次要几十个 RTT，速度就被压在几百 KB/s 且非常「稳」。
+
+3.7 做的几处：
+
+| 位置 | 改动 | 针对什么 |
+| --- | --- | --- |
+| `gostack/fougw/netstack.go` | 拥塞控制 Reno → **CUBIC** | 窗口增长与 RTT 解耦，丢包后恢复快得多（Linux 默认算法） |
+| 同上 | `io.Copy` → `io.CopyBuffer` + `sync.Pool` 64KB | 每条连接少两次 32KB 分配，降低并发时的 GC 抖动 |
+| `gostack/fougw/gateway.go` | 隧道索引 key 由 `"ip:port"` 字符串 → `[4]byte + uint16` 结构 | 每个包少 3 次堆分配；收包热路径从全局写锁降为读锁 + 一次原子写 |
+| `ClientVpnService.java` | FOU UDP socket 收发缓冲申请 1MB，复用 `DatagramPacket` | Android 默认 UDP 缓冲只有一两百 KB，蜂窝侧突发会灌满并丢包；UDP 丢一个内层 TCP 就退窗 |
+
+启动后 App 日志会打 `FOU socket 缓冲 rx=…B tx=…B（申请 1048576B）`。内核会按 `net.core.rmem_max` / `wmem_max` 截断，读回值明显小于申请值说明被系统限制了，这是 ROM 限制、App 改不动。
+
+**怎么判断瓶颈在哪一侧**（配合 ESP32 固件的 `http://192.168.4.1/speed` 端点，它由 ESP32 本地生成 4MB 数据，完全绕开 FOU / 手机 / 蜂窝）：
+
+| `/speed` 结果 | 结论 |
+| --- | --- |
+| ≥ 1MB/s，但上网仍只有几百 KB/s | 空口和 ESP32 清白，瓶颈在手机蜂窝 RTT / TCP 栈 —— 正是 CUBIC 要对症的场景 |
+| 也只有几百 KB/s | 瓶颈在 2.4G 空口，去固件网页试 1/6/11 信道 × 20/40MHz |
+
+另一个快速判据：用多线程下载工具（4–8 连接）下同一个大文件。总速度随连接数上涨 = 单连接被 cwnd / RTT 卡住；总速度不动 = 链路级上限。
+
 ## 从源码构建
 
 不依赖 Gradle 联网，直接调 SDK 里的 `aapt2` / `javac` / `d8` / `apksigner`：

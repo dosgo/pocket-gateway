@@ -49,6 +49,12 @@ public class ClientVpnService extends VpnService {
     private static final String TUN_IP = "10.7.0.2";
     private static final int TUN_MTU = 1400;
     private static final int BUF = 32768;
+    /**
+     * FOU 外层 UDP socket 的内核收发缓冲。Android 默认值常只有一两百 KB，
+     * 蜂窝侧一个大窗口突发就能把它灌满；UDP 不重传，丢一个包内层 TCP 就退窗。
+     * 内核会按 net.core.rmem_max/wmem_max 截断，所以下面读回实际值并写日志。
+     */
+    private static final int UDP_BUF = 1 << 20;
 
     private ParcelFileDescriptor tun;
     private DatagramSocket udp;
@@ -131,12 +137,20 @@ public class ClientVpnService extends VpnService {
             @Override
             public void run() {
                 byte[] upBuf = new byte[BUF];
+                DatagramPacket upPkt = new DatagramPacket(upBuf, upBuf.length);
                 while (running) {
                     DatagramSocket s = null;
                     Thread down = null;
                     try {
                         s = new DatagramSocket();
                         s.setSoTimeout(0);
+                        try {
+                            s.setReceiveBufferSize(UDP_BUF);
+                            s.setSendBufferSize(UDP_BUF);
+                            Logs.add("FOU socket 缓冲 rx=" + s.getReceiveBufferSize()
+                                    + "B tx=" + s.getSendBufferSize() + "B（申请 " + UDP_BUF + "B）");
+                        } catch (Throwable ignore) {
+                        }
                         s.connect(InetAddress.getByName(gwIp), gwPort);
                         udp = s;
                         final DatagramSocket fs = s;
@@ -144,13 +158,18 @@ public class ClientVpnService extends VpnService {
                             @Override
                             public void run() {
                                 byte[] b = new byte[BUF];
+                                // 复用同一个包对象：每包 new DatagramPacket 在几千 pps 下
+                                // 会制造明显的 GC 抖动，直接表现为吞吐周期性掉坑
+                                DatagramPacket dp = new DatagramPacket(b, b.length);
                                 while (running) {
                                     try {
-                                        DatagramPacket dp = new DatagramPacket(b, b.length);
+                                        // receive() 会把 length 改成实际收到长度，下次必须复位
+                                        dp.setLength(b.length);
                                         fs.receive(dp);
-                                        out.write(b, 0, dp.getLength());
+                                        int len = dp.getLength();
+                                        out.write(b, 0, len);
                                         downPkts++;
-                                        downBytes += dp.getLength();
+                                        downBytes += len;
                                     } catch (Throwable t) {
                                         break;
                                     }
@@ -165,7 +184,8 @@ public class ClientVpnService extends VpnService {
                                 continue;
                             }
                             try {
-                                fs.send(new DatagramPacket(upBuf, n));
+                                upPkt.setLength(n);
+                                fs.send(upPkt);
                                 upPkts++;
                                 upBytes += n;
                             } catch (Throwable t) {

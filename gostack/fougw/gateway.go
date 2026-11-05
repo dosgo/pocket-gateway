@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,9 +18,21 @@ type Config struct {
 	Verbose bool `json:"verbose"`
 }
 
+// tupleKey 用定长结构当 map key，避免热路径上每个包都做
+// net.IP.String() + strconv.Itoa + JoinHostPort 三次堆分配。
+type tupleKey struct {
+	ip   [4]byte
+	port uint16
+}
+
 type clientEp struct {
 	addr *net.UDPAddr
-	at   time.Time
+	// 收包热路径上只做一次原子写，不再为每个包拿全局写锁
+	at atomic.Int64 // UnixNano
+}
+
+func sameAddr(a, b *net.UDPAddr) bool {
+	return a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
 }
 
 // Gateway 是 FOU 网关实例：一个 UDP 监听 + 一个 gVisor netstack。
@@ -35,8 +46,8 @@ type Gateway struct {
 	// 同一台机器并发多条连接时，不同连接可能来自不同的外层 UDP 端口
 	// （每个 FOU 客户端一个），只按 IP 索引会让回包串到别的端口去。
 	mu      sync.RWMutex
-	byTuple map[string]*clientEp // 内层客户端 ip:port -> 外层地址
-	byIP    map[string]*clientEp // 内层 IP -> 最近一次出现的外层地址（ICMP 无端口时用）
+	byTuple map[tupleKey]*clientEp // 内层客户端 ip:port -> 外层地址
+	byIP    map[[4]byte]*clientEp  // 内层 IP -> 最近一次出现的外层地址（ICMP 无端口时用）
 
 	closed atomic.Bool
 
@@ -91,8 +102,8 @@ func Start(cfgJSON string) error {
 		conn:    conn,
 		mtu:     cfg.MTU,
 		verbose: cfg.Verbose,
-		byTuple: make(map[string]*clientEp),
-		byIP:    make(map[string]*clientEp),
+		byTuple: make(map[tupleKey]*clientEp),
+		byIP:    make(map[[4]byte]*clientEp),
 	}
 
 	st, err := newNetStack(uint32(cfg.MTU), g)
@@ -189,18 +200,31 @@ func (g *Gateway) recvLoop() {
 			continue
 		}
 
-		// 记下这个内层源 IP:端口 对应的外层隧道地址，回包时按内层目的 IP:端口 反查
-		innerIP := net.IP(pkt[12:16]).String()
-		now := time.Now()
-		ep := &clientEp{addr: from, at: now}
-		key := innerIP
+		// 记下这个内层源 IP:端口 对应的外层隧道地址，回包时按内层目的 IP:端口 反查。
+		// 绝大多数包都只是同一个会话的后续包，这里走 RLock + 一次原子写即可。
+		var ip4 [4]byte
+		copy(ip4[:], pkt[12:16])
+		var sport uint16
 		if n >= ihl+4 {
-			key = net.JoinHostPort(innerIP, strconv.Itoa(int(binary.BigEndian.Uint16(pkt[ihl:ihl+2]))))
+			sport = binary.BigEndian.Uint16(pkt[ihl : ihl+2])
 		}
-		g.mu.Lock()
-		g.byTuple[key] = ep
-		g.byIP[innerIP] = ep
-		g.mu.Unlock()
+		key := tupleKey{ip4, sport}
+		now := time.Now().UnixNano()
+
+		g.mu.RLock()
+		ep := g.byTuple[key]
+		g.mu.RUnlock()
+		if ep == nil || !sameAddr(ep.addr, from) {
+			// 新会话，或客户端重连后换了外层 UDP 端口
+			fresh := &clientEp{addr: from}
+			fresh.at.Store(now)
+			g.mu.Lock()
+			g.byTuple[key] = fresh
+			g.byIP[ip4] = fresh
+			g.mu.Unlock()
+		} else {
+			ep.at.Store(now)
+		}
 
 		g.rxPackets.Add(1)
 		g.rxBytes.Add(uint64(n))
@@ -233,19 +257,20 @@ func (g *Gateway) sendToClient(pkt []byte) {
 	if len(pkt) < 20 {
 		return
 	}
-	dstIP := net.IP(pkt[16:20]).String()
+	var ip4 [4]byte
+	copy(ip4[:], pkt[16:20])
 	ihl := int(pkt[0]&0x0f) * 4
 
 	// 回包的目的端口就是客户端的源端口，用它精确定位是哪条隧道
-	key := dstIP
+	var dport uint16
 	if (pkt[9] == 6 || pkt[9] == 17) && len(pkt) >= ihl+4 {
-		key = net.JoinHostPort(dstIP, strconv.Itoa(int(binary.BigEndian.Uint16(pkt[ihl+2:ihl+4]))))
+		dport = binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4])
 	}
 
 	g.mu.RLock()
-	ep := g.byTuple[key]
+	ep := g.byTuple[tupleKey{ip4, dport}]
 	if ep == nil {
-		ep = g.byIP[dstIP]
+		ep = g.byIP[ip4]
 	}
 	if ep == nil && len(g.byIP) == 1 {
 		for _, v := range g.byIP {
@@ -290,15 +315,15 @@ func (g *Gateway) statLoop() {
 
 // gc 清掉 5 分钟没动静的隧道端点，避免长跑之后 map 无限增长。
 func (g *Gateway) gc() {
-	cut := time.Now().Add(-5 * time.Minute)
+	cut := time.Now().Add(-5 * time.Minute).UnixNano()
 	g.mu.Lock()
 	for k, v := range g.byTuple {
-		if v.at.Before(cut) {
+		if v.at.Load() < cut {
 			delete(g.byTuple, k)
 		}
 	}
 	for k, v := range g.byIP {
-		if v.at.Before(cut) {
+		if v.at.Load() < cut {
 			delete(g.byIP, k)
 		}
 	}
