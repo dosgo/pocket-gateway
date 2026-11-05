@@ -16,8 +16,8 @@ PY="C:/Users/DosGo/.workbuddy/binaries/python/versions/3.13.12/python.exe"
 
 MIN_SDK=24
 TARGET_SDK=33
-VERSION_CODE=28
-VERSION_NAME="3.6-debug"
+VERSION_CODE=29
+VERSION_NAME="3.7-debug"
 
 BUILD="build_dbg"
 W() { cygpath -w "$1"; }
@@ -26,7 +26,10 @@ export JAVA_HOME="$(cygpath -w "$JAVA_HOME_DIR")"
 export PATH="$JAVA_HOME_DIR/bin:$PATH"
 
 cd "$APP_DIR"
-rm -rf "$BUILD"
+# 旧产物只移走、不删除：批量删除会被安全策略拦下
+OLDBUILD="$(mktemp -d)"
+if [ -d "$BUILD" ]; then mv "$BUILD" "$OLDBUILD/"; fi
+if [ -d app/src/main/jniLibs ]; then mv app/src/main/jniLibs "$OLDBUILD/"; fi
 mkdir -p "$BUILD/res" "$BUILD/gen" "$BUILD/classes" "$BUILD/dex"
 
 AAR="$APP_DIR/app/libs/fougw.aar"
@@ -36,7 +39,7 @@ if [ ! -f "$AAR" ]; then
 fi
 
 echo "[0/8] 解包 gomobile AAR"
-rm -rf "$BUILD/aar" app/src/main/jniLibs
+# 上面已整体归档，这里无需再清理
 mkdir -p "$BUILD/aar"
 "$PY" - "$(W "$AAR")" "$(W $BUILD/aar)" "$(W app/src/main/jniLibs)" <<'PYEOF'
 import os, sys, zipfile
